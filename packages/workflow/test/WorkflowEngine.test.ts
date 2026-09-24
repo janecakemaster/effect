@@ -1,6 +1,7 @@
 import { assert, describe, expect, it } from "@effect/vitest"
 import { DurableClock, DurableDeferred, Workflow, WorkflowEngine } from "@effect/workflow"
 import * as Cause from "effect/Cause"
+import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as FiberId from "effect/FiberId"
@@ -38,6 +39,42 @@ describe("WorkflowEngine", () => {
         )
       )
     ))
+
+  it.effect("polls a pending parent after its child clock has fired", () =>
+    Effect.gen(function*() {
+      const releaseParent = yield* Deferred.make<void>()
+      const childFinished = yield* Deferred.make<void>()
+      const parentLayer = ParentWorkflow.toLayer(Effect.fnUntraced(function*() {
+        yield* ChildWorkflow.execute({ id: "child-1" })
+        yield* Deferred.succeed(childFinished, void 0)
+        yield* Deferred.await(releaseParent)
+      }))
+
+      yield* Effect.gen(function*() {
+        const executionId = yield* ParentWorkflow.execute({ id: "parent-1" }, { discard: true })
+        yield* TestClock.adjust("1 hour")
+        yield* Deferred.await(childFinished)
+
+        assert.deepStrictEqual(
+          yield* ChildWorkflow.poll(yield* ChildWorkflow.executionId({ id: "child-1" })),
+          new Workflow.Complete({ exit: Exit.void })
+        )
+        assert.isUndefined(yield* ParentWorkflow.poll(executionId))
+
+        yield* Deferred.succeed(releaseParent, void 0)
+        yield* ParentWorkflow.execute({ id: "parent-1" })
+        assert.deepStrictEqual(
+          yield* ParentWorkflow.poll(executionId),
+          new Workflow.Complete({ exit: Exit.void })
+        )
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(parentLayer, ChildWorkflowLayer).pipe(
+            Layer.provideMerge(WorkflowEngine.layerMemory)
+          )
+        )
+      )
+    }))
 
   it.effect("does not squash workflow failures after suspension", () =>
     Effect.gen(function*() {
